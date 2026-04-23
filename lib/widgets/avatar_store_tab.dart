@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../core/coin_format.dart';
 import '../core/app_theme.dart';
+import '../core/responsive_metrics.dart';
 import '../models/game_avatar.dart';
 import 'app_ui.dart';
 import 'full_avatar_display.dart';
@@ -25,22 +27,20 @@ class AvatarStoreTab extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final width = constraints.maxWidth;
-        final spacing = width < 390 ? 12.0 : 16.0;
-        final horizontalPadding = width < 390 ? 14.0 : 18.0;
-        final cardWidth = ((width - horizontalPadding * 2 - spacing) / 2)
-          .clamp(0.0, double.infinity)
-          .toDouble();
-        final previewSize = (cardWidth * 0.54).clamp(90.0, 124.0).toDouble();
-        final childAspectRatio = cardWidth < 160
-            ? 0.71
-            : cardWidth < 190
-                ? 0.75
-                : 0.79;
-        final cardPadding = width < 390
-            ? const EdgeInsets.fromLTRB(12, 12, 12, 14)
-            : const EdgeInsets.fromLTRB(14, 14, 14, 16);
-        final buttonHeight = width < 390 ? 40.0 : 42.0;
+        final metrics =
+            UiMetrics.of(constraints, MediaQuery.orientationOf(context));
+        final spacing = metrics.cardGap;
+        final horizontalPadding = metrics.horizontalPadding;
+        final childAspectRatio = metrics.storeCardAspectRatio;
+        final cardPadding = EdgeInsets.fromLTRB(
+          metrics.sizeClass == DeviceSizeClass.compact ? 9 : 10,
+          metrics.sizeClass == DeviceSizeClass.compact ? 9 : 10,
+          metrics.sizeClass == DeviceSizeClass.compact ? 9 : 10,
+          metrics.sizeClass == DeviceSizeClass.compact ? 11 : 12,
+        );
+        final buttonHeight = metrics.buttonHeight;
+
+        final ownedSet = Set<int>.from(ownedAvatars);
 
         return GridView.builder(
           padding: EdgeInsets.fromLTRB(
@@ -58,17 +58,17 @@ class AvatarStoreTab extends StatelessWidget {
           itemCount: kGameAvatars.length,
           itemBuilder: (context, index) {
             final avatar = kGameAvatars[index];
-            final owned = ownedAvatars.contains(avatar.id);
+            final owned = ownedSet.contains(avatar.id);
             final equipped = equippedAvatar == avatar.id;
             final meta = _AvatarPresentation.forAvatar(avatar);
 
             return AppGlassCard(
           padding: cardPadding,
-          radius: 24,
+          radius: metrics.cardRadius,
           backgroundColor: equipped
-              ? Color.lerp(AppPalette.panelElevated, meta.color, 0.12)
+              ? Color.lerp(AppPalette.panelElevated, meta.color, 0.18)
               : AppPalette.panel,
-          borderColor: meta.color.withOpacity(equipped ? 0.50 : 0.26),
+          borderColor: meta.color.withOpacity(equipped ? 0.70 : owned ? 0.40 : 0.26),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withOpacity(0.30),
@@ -76,9 +76,9 @@ class AvatarStoreTab extends StatelessWidget {
               offset: const Offset(0, 14),
             ),
             BoxShadow(
-              color: meta.color.withOpacity(equipped ? 0.18 : 0.10),
-              blurRadius: 22,
-              spreadRadius: -6,
+              color: meta.color.withOpacity(equipped ? 0.28 : owned ? 0.14 : 0.10),
+              blurRadius: equipped ? 28 : 22,
+              spreadRadius: -4,
             ),
           ],
           child: Column(
@@ -95,11 +95,11 @@ class AvatarStoreTab extends StatelessWidget {
                   ),
                 ],
               ),
-              const SizedBox(height: 14),
+              SizedBox(height: spacing * 0.45),
               Expanded(
                 child: Container(
                   decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(22),
+                    borderRadius: BorderRadius.circular(metrics.cardRadius - 2),
                     gradient: LinearGradient(
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
@@ -110,48 +110,59 @@ class AvatarStoreTab extends StatelessWidget {
                     ),
                     border: Border.all(color: meta.color.withOpacity(0.16)),
                   ),
+                  padding: const EdgeInsets.all(2.5),
                   child: Stack(
                     children: [
                       Positioned(
-                        top: -18,
-                        right: -18,
-                        child: _AvatarAura(color: meta.color),
-                      ),
-                      Center(
-                        child: FullAvatarDisplay(
-                          size: previewSize,
-                          avatar: avatar,
+                        top: -14,
+                        right: -14,
+                        child: _AvatarAura(
+                          color: meta.color,
+                          size: 100,
                         ),
+                      ),
+                      LayoutBuilder(
+                        builder: (context, previewConstraints) {
+                          final previewSize = (previewConstraints.biggest.shortestSide * 1.03)
+                              .clamp(120.0, 280.0);
+                          return Center(
+                            child: FullAvatarDisplay(
+                              size: previewSize,
+                              avatar: avatar,
+                            ),
+                          );
+                        },
                       ),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: 14),
+              SizedBox(height: spacing * 0.45),
               Text(
                 avatar.name.toUpperCase(),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
                 style: safeOrbitron(
-                  fontSize: 13,
+                  fontSize: 12.5,
                   fontWeight: FontWeight.w800,
-                  letterSpacing: 1.4,
+                  letterSpacing: 1.2,
                   color: Colors.white,
                 ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 3),
               Text(
                 meta.subtitle,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
                 style: bodyFont(context).copyWith(
-                  fontSize: 12,
+                  fontSize: 11.5,
                   color: AppPalette.textMuted,
+                  height: 1.2,
                 ),
               ),
-              const SizedBox(height: 14),
+              SizedBox(height: spacing * 0.45),
               SizedBox(
                 height: buttonHeight,
                 child: _AvatarActionButton(
@@ -162,6 +173,7 @@ class AvatarStoreTab extends StatelessWidget {
                   busy: busy,
                   onBuyAvatar: onBuyAvatar,
                   onEquipAvatar: onEquipAvatar,
+                  metrics: metrics,
                 ),
               ),
             ],
@@ -304,6 +316,18 @@ Future<bool?> showAvatarPurchaseDialog(BuildContext context, GameAvatar avatar) 
   );
 }
 
+String _formatBuyCoinsLabel(int value) {
+  if (value >= 1000) {
+    final compact = value / 1000;
+    final fixed =
+        compact % 1 == 0 ? compact.toStringAsFixed(0) : compact.toStringAsFixed(1);
+    final normalized =
+        fixed.endsWith('.0') ? fixed.substring(0, fixed.length - 2) : fixed;
+    return 'BUY ${normalized}K';
+  }
+  return 'BUY ${formatCoins(value)}';
+}
+
 class _AvatarActionButton extends StatelessWidget {
   final GameAvatar avatar;
   final _AvatarPresentation meta;
@@ -312,6 +336,7 @@ class _AvatarActionButton extends StatelessWidget {
   final bool busy;
   final Future<void> Function(GameAvatar avatar) onBuyAvatar;
   final Future<void> Function(int id) onEquipAvatar;
+  final UiMetrics metrics;
 
   const _AvatarActionButton({
     required this.avatar,
@@ -321,6 +346,7 @@ class _AvatarActionButton extends StatelessWidget {
     required this.busy,
     required this.onBuyAvatar,
     required this.onEquipAvatar,
+    required this.metrics,
   });
 
   @override
@@ -332,6 +358,8 @@ class _AvatarActionButton extends StatelessWidget {
         stroke: meta.color.withOpacity(0.50),
         onPressed: null,
         icon: Icons.check_rounded,
+        labelFontSize: metrics.buttonFontSize,
+        labelLetterSpacing: metrics.buttonLetterSpacing,
       );
     }
 
@@ -343,6 +371,8 @@ class _AvatarActionButton extends StatelessWidget {
         onPressed: busy ? null : () => onEquipAvatar(avatar.id),
         icon: Icons.bolt_rounded,
         iconColor: meta.color,
+        labelFontSize: metrics.buttonFontSize,
+        labelLetterSpacing: metrics.buttonLetterSpacing,
       );
     }
 
@@ -353,19 +383,27 @@ class _AvatarActionButton extends StatelessWidget {
         stroke: AppPalette.primary.withOpacity(0.42),
         onPressed: busy ? null : () => onBuyAvatar(avatar),
         icon: Icons.card_giftcard_rounded,
+        fitLabel: true,
+        labelFontSize: metrics.buttonFontSize,
+        labelLetterSpacing: metrics.buttonLetterSpacing,
       );
     }
 
     return AppPillButton(
-      label: 'BUY ${avatar.price}',
+      label: _formatBuyCoinsLabel(avatar.price),
       fill: AppPalette.goldDeep,
       stroke: AppPalette.goldHighlight.withOpacity(0.54),
       onPressed: busy ? null : () => onBuyAvatar(avatar),
       leading: Image.asset(
         'assets/coin/COIN.png',
-        height: 16,
+        height: 14,
         fit: BoxFit.contain,
       ),
+      leadingSlotWidth: 16,
+      minHeight: metrics.buttonHeight,
+      fitLabel: true,
+      labelFontSize: metrics.buttonFontSize,
+      labelLetterSpacing: metrics.buttonLetterSpacing,
     );
   }
 }
@@ -398,14 +436,15 @@ class _RarityBadge extends StatelessWidget {
 
 class _AvatarAura extends StatelessWidget {
   final Color color;
+  final double size;
 
-  const _AvatarAura({required this.color});
+  const _AvatarAura({required this.color, required this.size});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 110,
-      height: 110,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         gradient: RadialGradient(
@@ -439,10 +478,28 @@ class _AvatarPresentation {
           subtitle: 'Starter collectible frame',
           color: AppPalette.rarityCommon,
         );
+      case 2:
+        return const _AvatarPresentation(
+          rarity: 'Common',
+          subtitle: 'Synchronized arena presence',
+          color: AppPalette.rarityCommon,
+        );
+      case 3:
+        return const _AvatarPresentation(
+          rarity: 'Legendary',
+          subtitle: 'Apex strength embodied',
+          color: AppPalette.rarityLegendary,
+        );
       case 4:
         return const _AvatarPresentation(
           rarity: 'Rare',
           subtitle: 'Cryo-tuned arena skin',
+          color: AppPalette.rarityRare,
+        );
+      case 5:
+        return const _AvatarPresentation(
+          rarity: 'Rare',
+          subtitle: 'Powerful atmospheric frame',
           color: AppPalette.rarityRare,
         );
       case 6:
@@ -451,13 +508,24 @@ class _AvatarPresentation {
           subtitle: 'Shadow-tier premium collectible',
           color: AppPalette.rarityEpic,
         );
+      case 7:
+        return const _AvatarPresentation(
+          rarity: 'Animated',
+          subtitle: 'Reactive premium arena frame',
+          color: AppPalette.rarityAnimated,
+        );
       case 8:
         return const _AvatarPresentation(
-          rarity: 'Legendary',
+          rarity: 'Animated',
           subtitle: 'Celestial collector showcase',
-          color: AppPalette.rarityLegendary,
+          color: AppPalette.rarityAnimated,
         );
-      case 7:
+      case 9:
+        return const _AvatarPresentation(
+          rarity: 'Epic',
+          subtitle: 'Cosmic shadow collector',
+          color: AppPalette.rarityEpic,
+        );
       case 10:
         return const _AvatarPresentation(
           rarity: 'Animated',

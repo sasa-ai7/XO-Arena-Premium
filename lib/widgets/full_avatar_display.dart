@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import '../models/game_avatar.dart';
@@ -25,14 +27,20 @@ class FullAvatarDisplay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<String?>(
-      valueListenable: _ProfilePhotoNotifier.instance,
-      builder: (_, photoUrl, __) => CompositeAvatar(
-        assetPath: avatar.assetPath,
-        photoUrl: photoUrl,
-        size: size,
-        fallbackName: fallbackName,
-        profileSizeRatio: avatar.profileSizeRatio,
-        verticalOffset: avatar.verticalOffset,
+      valueListenable: _ProfilePhotoPathNotifier.instance,
+      builder: (_, photoPath, __) => ValueListenableBuilder<String?>(
+        valueListenable: _ProfilePhotoNotifier.instance,
+        builder: (_, photoUrl, __) => CompositeAvatar(
+          assetPath: avatar.assetPath,
+          photoUrl: photoUrl,
+          photoPath: photoPath,
+          size: size,
+          fallbackName: fallbackName,
+          profileSizeRatio: avatar.previewScale,
+          frameScale: avatar.frameScale,
+          verticalOffset: avatar.verticalOffset,
+          innerCircleScale: avatar.innerCircleScale,
+        ),
       ),
     );
   }
@@ -42,10 +50,20 @@ class FullAvatarDisplay extends StatelessWidget {
   static void bindNotifier(ValueNotifier<String?> notifier) {
     _ProfilePhotoNotifier._bound = notifier;
   }
+
+  static void bindLocalPathNotifier(ValueNotifier<String?> notifier) {
+    _ProfilePhotoPathNotifier._bound = notifier;
+  }
 }
 
 /// Thin indirection so full_avatar_display.dart doesn't import main.dart.
 class _ProfilePhotoNotifier {
+  static ValueNotifier<String?>? _bound;
+  static ValueNotifier<String?> get instance =>
+      _bound ?? ValueNotifier<String?>(null);
+}
+
+class _ProfilePhotoPathNotifier {
   static ValueNotifier<String?>? _bound;
   static ValueNotifier<String?> get instance =>
       _bound ?? ValueNotifier<String?>(null);
@@ -61,21 +79,25 @@ class _ProfilePhotoNotifier {
 class CompositeAvatar extends StatefulWidget {
   final String? assetPath;
   final String? photoUrl;
+  final String? photoPath;
   final double size;
   final String fallbackName;
   final double profileSizeRatio;
-  final double verticalOffsetRatio;
+  final double frameScale;
   final double verticalOffset;
+  final double innerCircleScale;
 
   const CompositeAvatar({
     super.key,
     this.assetPath,
     this.photoUrl,
+    this.photoPath,
     required this.size,
     this.fallbackName = 'P',
     this.profileSizeRatio = 0.80,
-    this.verticalOffsetRatio = 0.04,
+    this.frameScale = 1.0,
     this.verticalOffset = 0.0,
+    this.innerCircleScale = 1.0,
   });
 
   @override
@@ -111,7 +133,7 @@ class _CompositeAvatarState extends State<CompositeAvatar> {
       _dimensionFuture = AvatarAnalyzerService.analyze(
         widget.assetPath!,
         defaultProfileSizeRatio: widget.profileSizeRatio,
-        defaultVerticalOffsetRatio: widget.verticalOffsetRatio,
+        defaultVerticalOffsetRatio: widget.verticalOffset,
       );
     }
   }
@@ -124,44 +146,95 @@ class _CompositeAvatarState extends State<CompositeAvatar> {
       child: FutureBuilder<AvatarDimension>(
         future: _dimensionFuture,
         builder: (context, snapshot) {
+          // Use cached dimension if available, otherwise safe defaults
           final dim = snapshot.data ?? AvatarDimension(
             centerDxRatio: 0.5,
-            centerDyRatio: 0.5 - widget.verticalOffsetRatio,
+            centerDyRatio: 0.5 - widget.verticalOffset,
             radiusRatio: widget.profileSizeRatio / 2,
           );
 
-          return AspectRatio(
-            aspectRatio: 1,
-            child: Stack(
-              clipBehavior: Clip.hardEdge,
-              children: [
-                // -- Layer 1 (bottom): circular profile picture --
-                _buildProfileLayer(dim),
-
-                // -- Layer 2 (top): full uncropped avatar frame --
-                if (widget.assetPath != null && widget.assetPath!.isNotEmpty)
-                  Positioned.fill(
-                    child: Image.asset(
-                      widget.assetPath!,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                    ),
-                  ),
-              ],
-            ),
+          return _AvatarContent(
+            size: widget.size,
+            dim: dim,
+            assetPath: widget.assetPath,
+            photoUrl: widget.photoUrl,
+            photoPath: widget.photoPath,
+            fallbackName: widget.fallbackName,
+            frameScale: widget.frameScale,
+            innerCircleScale: widget.innerCircleScale,
+            verticalOffset: widget.verticalOffset,
           );
         },
       ),
     );
   }
+}
 
-  Widget _buildProfileLayer(AvatarDimension dim) {
-    final circleSize = widget.size * dim.radiusRatio * 2;
-    
-    // The image widget size is widget.size. 
-    // Top-left of the circle should be centered at (dim.centerDxRatio, dim.centerDyRatio)
-    final dx = (widget.size * dim.centerDxRatio) - (circleSize / 2);
-    final dy = (widget.size * dim.centerDyRatio) - (circleSize / 2);
+/// Helper widget to render avatar content without blocking on FutureBuilder.
+class _AvatarContent extends StatelessWidget {
+  final double size;
+  final AvatarDimension dim;
+  final String? assetPath;
+  final String? photoUrl;
+  final String? photoPath;
+  final String fallbackName;
+  final double frameScale;
+  final double innerCircleScale;
+  final double verticalOffset;
+
+  const _AvatarContent({
+    required this.size,
+    required this.dim,
+    this.assetPath,
+    this.photoUrl,
+    this.photoPath,
+    required this.fallbackName,
+    required this.frameScale,
+    required this.innerCircleScale,
+    required this.verticalOffset,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AspectRatio(
+      aspectRatio: 1,
+      child: FittedBox(
+        fit: BoxFit.contain,
+        child: SizedBox.square(
+          dimension: size,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              // Layer 1: circular profile picture
+              _buildProfileLayer(),
+
+              // Layer 2: avatar frame asset
+              if (assetPath != null && assetPath!.isNotEmpty)
+                Positioned.fill(
+                  child: Transform.scale(
+                    scale: frameScale,
+                    child: Image.asset(
+                      assetPath!,
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProfileLayer() {
+    final scaledRadiusRatio = (dim.radiusRatio * innerCircleScale).clamp(0.30, 0.47);
+    final circleSize = size * scaledRadiusRatio * 2;
+    final maxLeft = size - circleSize;
+    final rawDx = (size * dim.centerDxRatio) - (circleSize / 2);
+    final rawDy = (size * (dim.centerDyRatio - verticalOffset)) - (circleSize / 2);
+    final dx = rawDx.clamp(0.0, maxLeft);
+    final dy = rawDy.clamp(0.0, maxLeft);
 
     final whiteCircle = Container(
       width: circleSize,
@@ -172,7 +245,35 @@ class _CompositeAvatarState extends State<CompositeAvatar> {
       ),
     );
 
-    if (widget.photoUrl != null && widget.photoUrl!.isNotEmpty) {
+    if (photoPath != null && photoPath!.isNotEmpty) {
+      final file = File(photoPath!);
+      return Positioned(
+        left: dx,
+        top: dy,
+        child: SizedBox(
+          width: circleSize,
+          height: circleSize,
+          child: Stack(
+            children: [
+              whiteCircle,
+              ClipOval(
+                child: Image(
+                  image: FileImage(file),
+                  width: circleSize,
+                  height: circleSize,
+                  fit: BoxFit.cover,
+                  alignment: const Alignment(0, -0.06),
+                  errorBuilder: (_, __, ___) =>
+                      _InitialCircle(name: fallbackName, size: circleSize),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (photoUrl != null && photoUrl!.isNotEmpty) {
       return Positioned(
         left: dx,
         top: dy,
@@ -184,16 +285,17 @@ class _CompositeAvatarState extends State<CompositeAvatar> {
               whiteCircle,
               ClipOval(
                 child: CachedNetworkImage(
-                  imageUrl: widget.photoUrl!,
+                  imageUrl: photoUrl!,
                   width: circleSize,
                   height: circleSize,
                   fit: BoxFit.cover,
+                  alignment: const Alignment(0, -0.06),
                   placeholder: (_, __) => _InitialCircle(
-                    name: widget.fallbackName,
+                    name: fallbackName,
                     size: circleSize,
                   ),
                   errorWidget: (_, __, ___) => _InitialCircle(
-                    name: widget.fallbackName,
+                    name: fallbackName,
                     size: circleSize,
                   ),
                 ),
@@ -210,7 +312,7 @@ class _CompositeAvatarState extends State<CompositeAvatar> {
       child: Stack(
         children: [
           whiteCircle,
-          _InitialCircle(name: widget.fallbackName, size: circleSize),
+          _InitialCircle(name: fallbackName, size: circleSize),
         ],
       ),
     );

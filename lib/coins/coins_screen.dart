@@ -4,9 +4,10 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
-import 'package:intl/intl.dart';
 
+import '../core/coin_format.dart';
 import '../core/app_theme.dart';
+import '../core/responsive_metrics.dart';
 import '../main.dart' show CoinsHistoryPage, LocalStore, showSignInRequiredDialog;
 import '../services/connectivity_service.dart';
 import '../widgets/app_ui.dart';
@@ -26,13 +27,11 @@ class _CoinsScreenState extends State<CoinsScreen> {
   late final CoinsController _controller;
   final IapCoinsService _iapService = IapCoinsService();
   int _coins = 0;
-  StreamSubscription<List<PurchaseDetails>>? _purchaseSubscription;
   StreamSubscription<PurchaseGrantResult>? _coinGrantSubscription;
   String? _pendingPurchaseProductId;
-  int? _pendingPurchaseCoins;
   bool _isLoadingPurchase = false;
-  String? _loadingProductId;
   Timer? _loadingTimeout;
+  bool _isDisposed = false;
 
   @override
   void initState() {
@@ -44,23 +43,9 @@ class _CoinsScreenState extends State<CoinsScreen> {
       LocalStore.coinsNotifier.addListener(_onCoinsChanged);
       _setupPurchaseListener();
       
-      // Clean up any stuck purchases when screen opens (like PUBG Mobile)
-      // This quickly resolves any "already owned" issues
-      _iapService.consumePendingPurchases().catchError((e) {
-        if (kDebugMode) {
-          debugPrint('[CoinsScreen] Error consuming pending purchases (non-fatal): $e');
-        }
-        // Non-fatal - continue with screen initialization
-      });
-      
-      _controller.init().then((_) {
-        if (mounted) setState(() {});
-      }).catchError((e, st) {
-        if (kDebugMode) {
-          debugPrint('[CoinsScreen] Init error: $e');
-          debugPrint('[CoinsScreen] StackTrace: $st');
-        }
-        // Don't crash - continue with cached data
+      // Defer heavy IAP work to after first render for faster screen appearance
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _performDeferredInit();
       });
     } catch (e, st) {
       if (kDebugMode) {
@@ -73,10 +58,10 @@ class _CoinsScreenState extends State<CoinsScreen> {
 
   @override
   void dispose() {
+    _isDisposed = true;
     try {
       _loadingTimeout?.cancel();
       LocalStore.coinsNotifier.removeListener(_onCoinsChanged);
-      _purchaseSubscription?.cancel();
       _coinGrantSubscription?.cancel();
       _controller.removeListener(_onControllerChanged);
       _controller.dispose();
@@ -100,6 +85,21 @@ class _CoinsScreenState extends State<CoinsScreen> {
   void _onControllerChanged() {
     if (mounted) {
       setState(() {});
+    }
+  }
+
+  Future<void> _performDeferredInit() async {
+    if (!mounted || _isDisposed) return;
+    try {
+      if (!mounted || _isDisposed) return;
+      await _controller.init();
+      if (mounted && !_isDisposed) setState(() {});
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('[CoinsScreen] Controller init error: $e');
+        debugPrint('[CoinsScreen] StackTrace: $st');
+      }
+      // Don't crash - continue with cached data
     }
   }
 
@@ -293,85 +293,6 @@ class _CoinsScreenState extends State<CoinsScreen> {
     }
   }
 
-  /// Retry purchase for a specific product
-  Future<void> _retryPurchase(String productId) async {
-    try {
-      // Check connectivity - only allow purchases when online
-      final isOnline = await ConnectivityService().online;
-      if (!isOnline) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              behavior: SnackBarBehavior.floating,
-              margin: const EdgeInsets.all(16),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-                side: const BorderSide(color: AppPalette.danger, width: 1.5),
-              ),
-              backgroundColor: AppPalette.surface2,
-              content: Row(
-                children: [
-                  const Icon(Icons.error_outline, color: Colors.white),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      'You need an internet connection to purchase coins',
-                      style: safeInter(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
-                    ),
-                  ),
-                ],
-              ),
-              duration: const Duration(seconds: 3),
-            ),
-          );
-        }
-        return;
-      }
-      
-      final product = _controller.products.firstWhere(
-        (p) => p.id == productId,
-        orElse: () => throw Exception('Product not found: $productId'),
-      );
-      
-      _showLoadingDialog(productId);
-      
-      final success = await _controller.buyPack(productId);
-      
-      if (!success && mounted) {
-        _hideLoadingDialog();
-        // Error will be handled by purchase stream
-      }
-    } catch (e) {
-      if (mounted) {
-        _hideLoadingDialog();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            behavior: SnackBarBehavior.floating,
-            margin: const EdgeInsets.all(16),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-              side: const BorderSide(color: AppPalette.danger, width: 1.5),
-            ),
-            backgroundColor: AppPalette.surface2,
-            content: Row(
-              children: [
-                const Icon(Icons.error_outline, color: Colors.white),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    'Retry failed: ${e.toString()}',
-                    style: safeInter(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
-                  ),
-                ),
-              ],
-            ),
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-    }
-  }
-
   Future<void> _loadCoins() async {
     final coins = await LocalStore.coins();
     if (mounted) {
@@ -481,10 +402,9 @@ class _CoinsScreenState extends State<CoinsScreen> {
 
     setState(() {
       _pendingPurchaseProductId = product.id;
-      _pendingPurchaseCoins = coinAmount;
     });
 
-    _showLoadingDialog(product.id);
+    _showLoadingDialog();
     try {
       final success = await _controller.buyPack(product.id);
       if (!mounted) return;
@@ -519,18 +439,16 @@ class _CoinsScreenState extends State<CoinsScreen> {
       if (mounted) {
         setState(() {
           _pendingPurchaseProductId = null;
-          _pendingPurchaseCoins = null;
         });
       }
     }
   }
 
   /// Show loading dialog when purchase is processing
-  void _showLoadingDialog(String productId) {
+  void _showLoadingDialog() {
     if (_isLoadingPurchase) return; // Already showing
 
     _isLoadingPurchase = true;
-    _loadingProductId = productId;
 
     // Safety timeout: dismiss loading dialog after 60 seconds to prevent stuck UI
     _loadingTimeout?.cancel();
@@ -605,7 +523,6 @@ class _CoinsScreenState extends State<CoinsScreen> {
     _loadingTimeout?.cancel();
     if (_isLoadingPurchase && mounted) {
       _isLoadingPurchase = false;
-      _loadingProductId = null;
       if (Navigator.of(context).canPop()) {
         Navigator.of(context).pop();
       }
@@ -742,96 +659,91 @@ class _CoinsScreenState extends State<CoinsScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const SizedBox(height: 6),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final titleWidth =
-                  (constraints.maxWidth - 56.0).clamp(0.0, double.infinity)
-                      .toDouble();
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+          Align(
+            alignment: Alignment.centerRight,
+            child: AppIconButton(
+              icon: Icons.folder_outlined,
+              onTap: () async {
+                await Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const CoinsHistoryPage(),
+                  ),
+                );
+                await _refreshCoins();
+              },
+            ),
+          ),
+          const SizedBox(height: 14),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Center(
+              child: Text(
+                'Buy Coins',
+                style: safeOrbitron(
+                  fontSize: 24,
+                  fontWeight: FontWeight.w900,
+                  color: AppPalette.homeTitle,
+                ),
+              ),
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 18,
+              vertical: 14,
+            ),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  AppPalette.panelSoft.withOpacity(0.8),
+                  AppPalette.panelSoft.withOpacity(0.4),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: AppPalette.homeStroke.withOpacity(0.4),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: AppPalette.homeStroke.withOpacity(0.3),
+                  blurRadius: 12,
+                  spreadRadius: 2,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              mainAxisSize: MainAxisSize.max,
+              children: [
+                Image.asset(
+                  'assets/coin/COIN-SHOP.png',
+                  width: 80,
+                  height: 80,
+                  fit: BoxFit.contain,
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      SizedBox(
-                        width: titleWidth,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Buy Coins',
-                              style: titleFont(context).copyWith(fontSize: 22),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Top up your wallet fast and get back into the arena.',
-                              style: bodyFont(context).copyWith(
-                                fontSize: 13,
-                                color: AppPalette.textMuted,
-                              ),
-                            ),
-                          ],
+                      Text(
+                        formatCoins(_coins, compact: false),
+                        style: safeOrbitron(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                          color: AppPalette.homeTitle,
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      AppIconButton(
-                        icon: Icons.folder_outlined,
-                        onTap: () async {
-                          await Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => const CoinsHistoryPage(),
-                            ),
-                          );
-                          await _refreshCoins();
-                        },
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppPalette.panelSoft.withOpacity(0.52),
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(
-                        color: AppPalette.homeStroke.withOpacity(0.26),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Image.asset(
-                          'assets/coin/COIN-SHOP.png',
-                          width: 18,
-                          height: 18,
-                          fit: BoxFit.contain,
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          NumberFormat.decimalPattern().format(_coins),
-                          style: safeOrbitron(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w900,
-                            color: AppPalette.homeTitle,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          'in wallet',
-                          style: bodyFont(context).copyWith(
-                            fontSize: 12,
-                            color: AppPalette.textMuted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              );
-            },
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 14),
           if (_controller.loading)
@@ -925,12 +837,12 @@ class _CoinsScreenState extends State<CoinsScreen> {
     final isGuest = FirebaseAuth.instance.currentUser == null;
     return LayoutBuilder(
       builder: (context, constraints) {
+        final metrics =
+            UiMetrics.of(constraints, MediaQuery.orientationOf(context));
         final width = constraints.maxWidth;
-        final crossAxisCount = width >= 690 ? 3 : 2;
-        final spacing = width < 390 ? 10.0 : 12.0;
-        final childAspectRatio = crossAxisCount == 2
-            ? (width < 390 ? 0.71 : 0.77)
-            : 0.72;
+        final crossAxisCount = metrics.coinsColumns(width);
+        final spacing = metrics.cardGap;
+        final childAspectRatio = metrics.coinsCardAspectRatio;
 
         return GridView.builder(
           shrinkWrap: true,
@@ -955,7 +867,7 @@ class _CoinsScreenState extends State<CoinsScreen> {
 
             return AppGlassCard(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
-          radius: 24,
+          radius: metrics.cardRadius,
           backgroundColor: Color.lerp(
             AppPalette.panel,
             presentation.accent,
@@ -1006,16 +918,16 @@ class _CoinsScreenState extends State<CoinsScreen> {
               const SizedBox(height: 10),
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
                   child: Image.asset(
                     presentation.assetPath,
                     fit: BoxFit.contain,
                   ),
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               Text(
-                NumberFormat.decimalPattern().format(coinAmount),
+                formatCoins(coinAmount, compact: true),
                 textAlign: TextAlign.center,
                 style: statNumberFont(
                   context,

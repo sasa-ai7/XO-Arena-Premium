@@ -5,7 +5,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
-import 'package:in_app_purchase_platform_interface/in_app_purchase_platform_interface.dart';
 import 'package:in_app_purchase_android/in_app_purchase_android.dart';
 
 import '../main.dart' show LocalStore;
@@ -47,6 +46,8 @@ class IapCoinsService {
   final CoinsVerificationService _verificationService = CoinsVerificationService();
   StreamSubscription<List<PurchaseDetails>>? _purchaseSubscription;
   bool _isAvailable = false;
+  Future<void>? _initFuture;
+  bool _initialized = false;
 
   /// In-flight verification dedup: prevents multiple concurrent server calls
   /// for the same purchaseToken (Google Play can emit duplicate events).
@@ -61,6 +62,18 @@ class IapCoinsService {
   /// Initialize the IAP service and set up purchase stream.
   /// Also restores any unconsumed purchases on startup.
   Future<void> init() async {
+    if (_initialized) return;
+    if (_initFuture != null) return _initFuture!;
+    _initFuture = _initInternal();
+    try {
+      await _initFuture;
+      _initialized = true;
+    } finally {
+      _initFuture = null;
+    }
+  }
+
+  Future<void> _initInternal() async {
     _isAvailable = await _iap.isAvailable();
     if (!_isAvailable) {
       if (kDebugMode) {
@@ -70,6 +83,7 @@ class IapCoinsService {
     }
 
     // Listen to purchase updates
+    await _purchaseSubscription?.cancel();
     _purchaseSubscription = _iap.purchaseStream.listen(
       _handlePurchaseUpdates,
       onDone: () {
@@ -98,7 +112,7 @@ class IapCoinsService {
   void dispose() {
     _purchaseSubscription?.cancel();
     _purchaseSubscription = null;
-    _coinGrantController.close();
+    _initialized = false;
   }
 
   /// Load products from the store.
@@ -129,8 +143,8 @@ class IapCoinsService {
       );
 
       if (response.error != null) {
-        final errorCode = response.error!.code?.toLowerCase() ?? '';
-        final errorMessage = response.error!.message?.toLowerCase() ?? '';
+        final errorCode = response.error!.code.toLowerCase();
+        final errorMessage = response.error!.message.toLowerCase();
         
         if (kDebugMode) {
           debugPrint('[IAP] Error loading products: ${response.error}');
@@ -222,7 +236,7 @@ class IapCoinsService {
       return success;
     } on PlatformException catch (e) {
       // Handle platform-specific errors
-      final errorCode = (e.code ?? '').toLowerCase();
+      final errorCode = e.code.toLowerCase();
       final errorMessage = (e.message ?? '').toLowerCase();
       
       if (kDebugMode) {
@@ -333,8 +347,8 @@ class IapCoinsService {
             debugPrint('[IAP] Error code: ${purchase.error!.code}, message: ${purchase.error!.message}');
             
             // Handle ITEM_ALREADY_OWNED error by querying and processing past purchases
-            final errorCode = purchase.error!.code?.toLowerCase() ?? '';
-            final errorMessage = purchase.error!.message?.toLowerCase() ?? '';
+            final errorCode = purchase.error!.code.toLowerCase();
+            final errorMessage = purchase.error!.message.toLowerCase();
             
             if (errorCode.contains('item_already_owned') || 
                 errorCode.contains('already_owned') ||
@@ -846,8 +860,8 @@ class IapCoinsService {
       }
     } on PlatformException catch (e) {
       // Handle platform-specific errors
-      final errorCode = e.code?.toLowerCase() ?? '';
-      final errorMessage = e.message?.toLowerCase() ?? '';
+      final errorCode = e.code.toLowerCase();
+      final errorMessage = (e.message ?? '').toLowerCase();
       
       if (errorCode.contains('not_found') || 
           errorMessage.contains('not_found') ||

@@ -669,6 +669,10 @@ class AuthService {
 
     // Clear local cache (preserve justDeletedAccount if needed)
     await UserRepo().clearLocalCache();
+    await LocalStore.setProfilePhotoPath(null);
+    await LocalStore.setProfilePhotoUrl(null);
+    LocalStore.profilePhotoUrlNotifier.value = null;
+    LocalStore.profileImagePathNotifier.value = null;
 
     // Clear session data
     await SessionService.clearLocal();

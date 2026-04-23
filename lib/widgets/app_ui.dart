@@ -3,8 +3,8 @@ import 'dart:math';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:intl/intl.dart';
 
+import '../core/coin_format.dart';
 import '../core/app_theme.dart';
 
 /// ==========================
@@ -41,19 +41,59 @@ class AppBackground extends StatelessWidget {
         ),
         child: Stack(
           children: [
-            Positioned.fill(
-              child: IgnorePointer(
-                child: Opacity(
-                  opacity: 0.34,
-                  child: CustomPaint(
-                    painter: _AmbientGridPainter(
-                      lineColor: AppPalette.homeCyan.withOpacity(0.035),
-                      dotColor: AppPalette.homeSky.withOpacity(0.13),
+            // Static background layers cached in RepaintBoundary to reduce GPU ops
+            RepaintBoundary(
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: Opacity(
+                        opacity: 0.34,
+                        child: CustomPaint(
+                          painter: _AmbientGridPainter(
+                            lineColor: AppPalette.homeCyan.withOpacity(0.035),
+                            dotColor: AppPalette.homeSky.withOpacity(0.13),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                ),
+                  Positioned.fill(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: const Alignment(0, -0.35),
+                          radius: 1.3,
+                          colors: [
+                            AppPalette.homeBlue.withOpacity(0.08),
+                            AppPalette.homePurple.withOpacity(0.03),
+                            Colors.transparent,
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.white.withOpacity(0.02),
+                              Colors.transparent,
+                              Colors.black.withOpacity(0.12),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
+            // Dynamic glow layers rendered on top
             Positioned(
               top: -170,
               left: -120,
@@ -100,38 +140,6 @@ class AppBackground extends StatelessWidget {
                   AppPalette.homeSky.withOpacity(0.03),
                   Colors.transparent,
                 ],
-              ),
-            ),
-            Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: RadialGradient(
-                    center: const Alignment(0, -0.35),
-                    radius: 1.3,
-                    colors: [
-                      AppPalette.homeBlue.withOpacity(0.08),
-                      AppPalette.homePurple.withOpacity(0.03),
-                      Colors.transparent,
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            Positioned.fill(
-              child: IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.white.withOpacity(0.02),
-                        Colors.transparent,
-                        Colors.black.withOpacity(0.12),
-                      ],
-                    ),
-                  ),
-                ),
               ),
             ),
             child,
@@ -245,6 +253,24 @@ class AppGlassCard extends StatelessWidget {
     this.boxShadow,
   });
 
+  static final List<BoxShadow> _defaultShadow = [
+    BoxShadow(
+      color: Colors.black.withValues(alpha: 0.34),
+      blurRadius: 28,
+      offset: const Offset(0, 18),
+    ),
+    BoxShadow(
+      color: AppPalette.primary.withValues(alpha: 0.08),
+      blurRadius: 24,
+      spreadRadius: -8,
+    ),
+    BoxShadow(
+      color: AppPalette.accentPurple.withValues(alpha: 0.04),
+      blurRadius: 30,
+      spreadRadius: -12,
+    ),
+  ];
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -267,24 +293,7 @@ class AppGlassCard extends StatelessWidget {
           color: borderColor ?? AppPalette.stroke,
           width: borderWidth,
         ),
-        boxShadow: boxShadow ??
-            [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.34),
-                blurRadius: 28,
-                offset: const Offset(0, 18),
-              ),
-              BoxShadow(
-                color: AppPalette.primary.withValues(alpha: 0.08),
-                blurRadius: 24,
-                spreadRadius: -8,
-              ),
-              BoxShadow(
-                color: AppPalette.accentPurple.withValues(alpha: 0.04),
-                blurRadius: 30,
-                spreadRadius: -12,
-              ),
-            ],
+        boxShadow: boxShadow ?? _defaultShadow,
       ),
       child: child,
     );
@@ -301,6 +310,11 @@ class AppPillButton extends StatelessWidget {
   final Color? fill;
   final Color? stroke;
   final double? minHeight;
+  final bool allowWrapLabel;
+  final bool fitLabel;
+  final double? labelFontSize;
+  final double? labelLetterSpacing;
+  final double leadingSlotWidth;
 
   const AppPillButton({
     super.key,
@@ -313,6 +327,11 @@ class AppPillButton extends StatelessWidget {
     this.fill,
     this.stroke,
     this.minHeight,
+    this.allowWrapLabel = false,
+    this.fitLabel = false,
+    this.labelFontSize,
+    this.labelLetterSpacing,
+    this.leadingSlotWidth = 0,
   });
 
   @override
@@ -363,7 +382,7 @@ class AppPillButton extends StatelessWidget {
                 shadowColor: Colors.transparent,
                 foregroundColor: AppPalette.text,
                 elevation: 0,
-                padding: const EdgeInsets.symmetric(horizontal: 20),
+                padding: const EdgeInsets.symmetric(horizontal: 14),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(18),
                 ),
@@ -379,10 +398,13 @@ class AppPillButton extends StatelessWidget {
                     )
                   : Row(
                       mainAxisAlignment: MainAxisAlignment.center,
-                      mainAxisSize: MainAxisSize.min,
+                      mainAxisSize: MainAxisSize.max,
                       children: [
                         if (leading != null) ...[
-                          leading!,
+                          SizedBox(
+                            width: leadingSlotWidth > 0 ? leadingSlotWidth : null,
+                            child: Center(child: leading!),
+                          ),
                           const SizedBox(width: 6),
                         ],
                         if (icon != null && leading == null) ...[
@@ -391,12 +413,33 @@ class AppPillButton extends StatelessWidget {
                           const SizedBox(width: 6),
                         ],
                         Flexible(
-                          child: Text(
-                            label,
-                            style: buttonFont(context),
-                            overflow: TextOverflow.ellipsis,
+                          child: fitLabel
+                              ? FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: Alignment.center,
+                                  child: Text(
+                                    label,
+                                    style: buttonFont(context).copyWith(
+                                      fontSize: labelFontSize,
+                                      letterSpacing: labelLetterSpacing,
+                                    ),
+                                    maxLines: 1,
+                                    textAlign: TextAlign.center,
+                                  ),
+                                )
+                              : Text(
+                                  label,
+                                  style: buttonFont(context).copyWith(
+                                    fontSize: labelFontSize,
+                                    letterSpacing: labelLetterSpacing,
+                                  ),
+                                  overflow: allowWrapLabel
+                                      ? TextOverflow.visible
+                                      : TextOverflow.ellipsis,
+                                  maxLines: allowWrapLabel ? 2 : 1,
+                                  textAlign: TextAlign.center,
+                                ),
                           ),
-                        ),
                       ],
                     ),
             ),
@@ -508,8 +551,7 @@ class PremiumBalanceBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final displayLabel = label ?? (guest ? 'ACCOUNT' : 'BALANCE');
-    final displayText =
-        guest ? 'Sign in' : NumberFormat.decimalPattern().format(coins);
+    final displayText = guest ? 'Sign in' : formatCoins(coins, compact: true);
     final accent = guest ? AppPalette.gold : AppPalette.primary;
 
     return LayoutBuilder(

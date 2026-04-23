@@ -13,6 +13,7 @@ class CoinsController extends ChangeNotifier {
   String? _errorMessage;
   bool _purchasing = false;
   bool _restoring = false;
+  bool _disposed = false;
 
   bool get loading => _loading;
   List<ProductDetails> get products => _products;
@@ -21,27 +22,23 @@ class CoinsController extends ChangeNotifier {
   bool get purchasing => _purchasing;
   bool get restoring => _restoring;
 
+  void _notifySafe() {
+    if (!_disposed) {
+      notifyListeners();
+    }
+  }
+
   /// Initialize and load products.
   Future<void> init() async {
     try {
       _loading = true;
-      notifyListeners();
+      _notifySafe();
 
-      // 1. Configure the IAP service
-      await _iapService.init();
+      // 1. Skip IAP init - already done in HomeHub._initIap() with idempotency
+      // This prevents duplicate GooglePlay queries
+      _storeAvailable = _iapService.isAvailable;
 
-      // 2. Remove any old lock immediately (solution for stuck purchases)
-      // This cleans up any purchases that were stuck before consumption
-      try {
-        await _iapService.clearExistingPurchases();
-      } catch (e) {
-        if (kDebugMode) {
-          debugPrint('[CoinsController] Error clearing existing purchases (non-fatal): $e');
-        }
-        // Non-fatal - continue with initialization
-      }
-
-      // 3. Load products
+      // 2. Load products
       await loadProducts();
 
       _storeAvailable = _iapService.isAvailable;
@@ -55,7 +52,7 @@ class CoinsController extends ChangeNotifier {
       _storeAvailable = false;
     } finally {
       _loading = false;
-      notifyListeners();
+      _notifySafe();
     }
   }
 
@@ -63,7 +60,7 @@ class CoinsController extends ChangeNotifier {
   Future<void> loadProducts() async {
     _loading = true;
     _errorMessage = null;
-    notifyListeners();
+    _notifySafe();
 
     try {
       _storeAvailable = _iapService.isAvailable;
@@ -83,7 +80,7 @@ class CoinsController extends ChangeNotifier {
       }
     } finally {
       _loading = false;
-      notifyListeners();
+      _notifySafe();
     }
   }
 
@@ -96,13 +93,13 @@ class CoinsController extends ChangeNotifier {
 
     _purchasing = true;
     _errorMessage = null;
-    notifyListeners();
+    _notifySafe();
 
     try {
       final success = await _iapService.buy(product);
       if (!success) {
         _errorMessage = 'Failed to initiate purchase. Please try again.';
-        notifyListeners();
+        _notifySafe();
       }
       return success;
     } catch (e) {
@@ -110,11 +107,11 @@ class CoinsController extends ChangeNotifier {
       if (kDebugMode) {
         debugPrint('[CoinsController] Purchase error: $e');
       }
-      notifyListeners();
+      _notifySafe();
       return false;
     } finally {
       _purchasing = false;
-      notifyListeners();
+      _notifySafe();
     }
   }
 
@@ -125,7 +122,7 @@ class CoinsController extends ChangeNotifier {
 
     _restoring = true;
     _errorMessage = null;
-    notifyListeners();
+    _notifySafe();
 
     try {
       await _iapService.restorePurchases();
@@ -139,14 +136,13 @@ class CoinsController extends ChangeNotifier {
       }
     } finally {
       _restoring = false;
-      notifyListeners();
+      _notifySafe();
     }
   }
 
-  /// Dispose resources.
   @override
   void dispose() {
-    _iapService.dispose();
+    _disposed = true;
     super.dispose();
   }
 }

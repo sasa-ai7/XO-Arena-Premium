@@ -17,12 +17,15 @@ import 'package:firebase_storage/firebase_storage.dart';
 
 import 'core/app_config.dart';
 import 'core/app_theme.dart';
+import 'core/coin_format.dart';
 import 'core/keys.dart';
+import 'core/responsive_metrics.dart';
 import 'firebase_options.dart';
 import 'screens/intro_screen.dart';
 import 'screens/login_screen.dart';
 import 'services/audit_service.dart';
 import 'services/auth_service.dart';
+import 'services/avatar_analyzer_service.dart';
 import 'services/connectivity_service.dart';
 import 'services/sound_service.dart';
 import 'services/session_service.dart';
@@ -51,6 +54,7 @@ Future<String> _prepareStartupRoute() async {
 
 Future<void> _warmStartupServices() async {
   FullAvatarDisplay.bindNotifier(LocalStore.profilePhotoUrlNotifier);
+  FullAvatarDisplay.bindLocalPathNotifier(LocalStore.profileImagePathNotifier);
 
   try {
     await LocalStore.ensureDefaults();
@@ -73,11 +77,26 @@ Future<void> _warmStartupServices() async {
     }
   }
 
-  await Future.wait<void>([
+  unawaited(Future.wait<void>([
     _initializeDateFormattingSafely('en_US'),
     _initializeDateFormattingSafely('pt_BR'),
     _initializeSoundServiceSafely(),
-  ]);
+  ]));
+  unawaited(Future<void>.delayed(
+    const Duration(milliseconds: 1200),
+    _preAnalyzeAvatarsSafely,
+  ));
+}
+
+Future<void> _preAnalyzeAvatarsSafely() async {
+  try {
+    await AvatarAnalyzerService.preAnalyzeAll();
+  } catch (error, stackTrace) {
+    if (kDebugMode) {
+      debugPrint('[startup] Avatar pre-analysis failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
+  }
 }
 
 Future<void> _initializeDateFormattingSafely(String locale) async {
@@ -436,6 +455,10 @@ class LocalStore {
     final uid = _uid;
     if (uid == null || updates.isEmpty) return;
 
+    // Skip sync if offline to prevent silent failures and coin loss
+    final isOnline = await ConnectivityService().online;
+    if (!isOnline) return;
+
     try {
       await UserRepo().syncToFirestore(uid, updates);
     } catch (error) {
@@ -683,13 +706,18 @@ class LocalStore {
 
   static Future<void> setProfilePhotoUrl(String? url) async {
     final p = await _p();
-    if (url == null || url.isEmpty) {
+    final currentUrl = p.getString(Keys.profilePhotoUrl);
+    final normalized = (url == null || url.isEmpty) ? null : url;
+    if (currentUrl == normalized && profilePhotoUrlNotifier.value == normalized) {
+      return;
+    }
+    if (normalized == null) {
       await p.remove(Keys.profilePhotoUrl);
       profilePhotoUrlNotifier.value = null;
       return;
     }
-    await p.setString(Keys.profilePhotoUrl, url);
-    profilePhotoUrlNotifier.value = url;
+    await p.setString(Keys.profilePhotoUrl, normalized);
+    profilePhotoUrlNotifier.value = normalized;
   }
 
   static Future<void> addTopupHistory(
@@ -2554,8 +2582,8 @@ Route<void> _buildStartupPageRoute(String routeName) {
 
   return PageRouteBuilder<void>(
     settings: RouteSettings(name: routeName),
-    transitionDuration: const Duration(milliseconds: 420),
-    reverseTransitionDuration: const Duration(milliseconds: 260),
+    transitionDuration: const Duration(milliseconds: 260),
+    reverseTransitionDuration: const Duration(milliseconds: 180),
     pageBuilder: (context, animation, secondaryAnimation) => page,
     transitionsBuilder: (context, animation, secondaryAnimation, child) {
       final fade = CurvedAnimation(
@@ -2659,11 +2687,15 @@ class _HomeHubState extends State<HomeHub>
     AuditService.log('app_open');
     _refresh();
     _startFirestoreListener();
-    _initIap();
     _startSessionListener();
     ConnectivityService().isOnline.addListener(_onConnectivityChanged);
     ConnectivityService().online.then((online) {
       if (mounted) setState(() => _offline = !online);
+    });
+
+    // Defer IAP init to avoid heavy work during Home startup
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initIap();
     });
 
     // Staggered entrance: smooth 600ms sequence
@@ -2692,11 +2724,16 @@ class _HomeHubState extends State<HomeHub>
   }
 
   /// Initialize IAP service early to catch pending purchases from interrupted sessions.
+  /// Uses static flag for idempotency to prevent duplicate initialization.
+  static bool _iapInitialized = false;
+
   Future<void> _initIap() async {
     if (_isGuest) return; // Guests can't purchase
+    if (_iapInitialized) return; // Skip if already initialized
+    _iapInitialized = true;
     try {
+      // IapCoinsService.init() includes purchase cleanup, no separate call needed
       await IapCoinsService().init();
-      await IapCoinsService().clearExistingPurchases();
       if (mounted) {
         _refresh(); // Refresh coins if any pending purchases were granted
       }
@@ -2839,13 +2876,19 @@ class _HomeHubState extends State<HomeHub>
         final serverName = (profile?['name'] as String?) ?? 'PLAYER';
 
         // Update UI immediately + broadcast to other screens
-        LocalStore.coinsNotifier.value = serverCoins;
+        if (LocalStore.coinsNotifier.value != serverCoins) {
+          LocalStore.coinsNotifier.value = serverCoins;
+        }
 
         // Write-through to SharedPreferences cache (keeps other screens in sync)
         try {
           final p = await SharedPreferences.getInstance();
-          await p.setInt(Keys.coins, serverCoins);
-          await p.setString(Keys.username, serverName);
+          if (p.getInt(Keys.coins) != serverCoins) {
+            await p.setInt(Keys.coins, serverCoins);
+          }
+          if (p.getString(Keys.username) != serverName) {
+            await p.setString(Keys.username, serverName);
+          }
 
           // Sync stats
           if (stats != null) {
@@ -2915,11 +2958,12 @@ class _HomeHubState extends State<HomeHub>
           }
 
           // Sync profile photo URL
-          final profilePhotoUrl = (profile?['photoURL'] as String?) ??
-              FirebaseAuth.instance.currentUser?.photoURL;
-          if (profilePhotoUrl != null && profilePhotoUrl.isNotEmpty) {
-            await LocalStore.setProfilePhotoUrl(profilePhotoUrl);
-          }
+          final firestorePhoto = profile?['photoURL'] as String?;
+          final authPhoto = FirebaseAuth.instance.currentUser?.photoURL;
+          final profilePhotoUrl = (firestorePhoto != null && firestorePhoto.isNotEmpty)
+              ? firestorePhoto
+              : ((authPhoto != null && authPhoto.isNotEmpty) ? authPhoto : null);
+          await LocalStore.setProfilePhotoUrl(profilePhotoUrl);
         } catch (e) {
           if (kDebugMode)
             debugPrint('[HomeHub] SharedPreferences write-through error: $e');
@@ -3149,10 +3193,11 @@ class _HomeHubState extends State<HomeHub>
   Future<void> _refresh() async {
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
-    setState(() {});
-    // Keep profile photo URL notifier in sync after login/navigation.
-    LocalStore.profilePhotoUrlNotifier.value =
-        p.getString(Keys.profilePhotoUrl);
+    final nextPhoto = p.getString(Keys.profilePhotoUrl);
+    if (LocalStore.profilePhotoUrlNotifier.value != nextPhoto) {
+      LocalStore.profilePhotoUrlNotifier.value = nextPhoto;
+      setState(() {});
+    }
   }
 
   Future<void> _openHomeCoinsStore() async {
@@ -3191,10 +3236,36 @@ class _HomeHubState extends State<HomeHub>
       child: InkWell(
         borderRadius: BorderRadius.circular(999),
         onTap: _openHomeCoinsStore,
-        child: Padding(
+        child: Container(
           padding: EdgeInsets.symmetric(
-            horizontal: compact ? 4 : 6,
-            vertical: landscape ? (compact ? 3 : 4) : (compact ? 4 : 6),
+            horizontal: compact ? 8 : 10,
+            vertical: landscape ? (compact ? 4 : 5) : (compact ? 5 : 7),
+          ),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                AppPalette.homePanelStrong.withOpacity(0.95),
+                AppPalette.homeBgSecondary.withOpacity(0.92),
+              ],
+            ),
+            border: Border.all(
+              color: AppPalette.homeStroke.withOpacity(0.38),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.22),
+                blurRadius: 14,
+                offset: const Offset(0, 8),
+              ),
+              BoxShadow(
+                color: AppPalette.gold.withOpacity(0.10),
+                blurRadius: 12,
+                spreadRadius: -4,
+              ),
+            ],
           ),
           child: ValueListenableBuilder<int>(
             valueListenable: LocalStore.coinsNotifier,
@@ -3213,9 +3284,9 @@ class _HomeHubState extends State<HomeHub>
                     ),
                     SizedBox(width: compact ? 6 : 8),
                     Text(
-                      NumberFormat.decimalPattern().format(coins),
+                      formatCoins(coins, compact: true),
                       style: homeOrbitron(
-                        fontSize: landscape ? 18 : (compact ? 18 : 22),
+                        fontSize: landscape ? 18 : (compact ? 17 : 21),
                         fontWeight: FontWeight.w900,
                         letterSpacing: 0.6,
                         color: AppPalette.homeTitle,
@@ -3261,22 +3332,22 @@ class _HomeHubState extends State<HomeHub>
 
   Widget _buildHomeTopBar() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 10, 18, 14),
+      padding: const EdgeInsets.fromLTRB(18, 8, 18, 10),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final width = constraints.maxWidth;
           final landscape =
               MediaQuery.orientationOf(context) == Orientation.landscape;
           final compact = width < 360;
-          final minSideWidth = 86.0;
-          final maxSideWidth = landscape ? 140.0 : 154.0;
+          final minSideWidth = 94.0;
+          final maxSideWidth = landscape ? 148.0 : 162.0;
           final desiredSideWidth = width * (landscape ? 0.22 : 0.24);
           final sideSlotWidth = min(
             max(minSideWidth, desiredSideWidth),
             min(maxSideWidth, max(minSideWidth, (width - 120.0) / 2)),
           );
           final centerWidth = max(120.0, width - sideSlotWidth * 2);
-          final topBarHeight = landscape ? 68.0 : (compact ? 78.0 : 90.0);
+          final topBarHeight = landscape ? 66.0 : (compact ? 74.0 : 84.0);
           final avatarSize = landscape ? 48.0 : (compact ? 50.0 : 60.0);
           final coinIconSize = landscape ? 26.0 : (compact ? 28.0 : 34.0);
 
@@ -3405,7 +3476,6 @@ class _HomeHubState extends State<HomeHub>
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final stacked = constraints.maxWidth < 470;
         final compact = constraints.maxWidth < 360;
         final textColumn = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -3418,12 +3488,18 @@ class _HomeHubState extends State<HomeHub>
               ),
             ),
             const SizedBox(height: 6),
-            Text(
-              'Choose your arena',
-              style: homeTitleFont(
-                context,
-                fontSize: compact ? 22 : 24,
-              ),
+            Row(
+              children: [
+                Text(
+                  'Choose your arena',
+                  style: homeTitleFont(
+                    context,
+                    fontSize: compact ? 22 : 24,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                counterTile,
+              ],
             ),
             const SizedBox(height: 6),
             Text(
@@ -3439,23 +3515,7 @@ class _HomeHubState extends State<HomeHub>
 
         return Padding(
           padding: const EdgeInsets.fromLTRB(4, 4, 4, 16),
-          child: stacked
-              ? Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    textColumn,
-                    const SizedBox(height: 12),
-                    counterTile,
-                  ],
-                )
-              : Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(child: textColumn),
-                    const SizedBox(width: 12),
-                    counterTile,
-                  ],
-                ),
+          child: textColumn,
         );
       },
     );
@@ -3536,6 +3596,18 @@ class _HomeHubState extends State<HomeHub>
     );
   }
 
+  PageRoute<T> _fadeRoute<T>(Widget page) {
+    return PageRouteBuilder<T>(
+      pageBuilder: (_, __, ___) => page,
+      transitionDuration: const Duration(milliseconds: 200),
+      reverseTransitionDuration: const Duration(milliseconds: 180),
+      transitionsBuilder: (_, animation, __, child) => FadeTransition(
+        opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+        child: child,
+      ),
+    );
+  }
+
   Widget _buildHomeContent() {
     final modes = <_HomeModeConfig>[
       _HomeModeConfig(
@@ -3546,9 +3618,7 @@ class _HomeHubState extends State<HomeHub>
         accent: AppPalette.homeCyan,
         accentSecondary: AppPalette.homeBlue,
         onTap: () async {
-          await Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const SetupPage()),
-          );
+          await Navigator.of(context).push(_fadeRoute(const SetupPage()));
           _refresh();
         },
       ),
@@ -3560,11 +3630,7 @@ class _HomeHubState extends State<HomeHub>
         accent: AppPalette.homePurple,
         accentSecondary: AppPalette.homePink,
         onTap: () async {
-          await Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => const FriendSetupPage(),
-            ),
-          );
+          await Navigator.of(context).push(_fadeRoute(const FriendSetupPage()));
           _refresh();
         },
       ),
@@ -3576,9 +3642,7 @@ class _HomeHubState extends State<HomeHub>
         accent: AppPalette.homeGold,
         accentSecondary: AppPalette.homePink,
         onTap: () async {
-          await Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const CoinMatchSetupPage()),
-          );
+          await Navigator.of(context).push(_fadeRoute(const CoinMatchSetupPage()));
           _refresh();
         },
       ),
@@ -3590,9 +3654,7 @@ class _HomeHubState extends State<HomeHub>
         accent: AppPalette.homeSky,
         accentSecondary: AppPalette.homeBlue,
         onTap: () async {
-          await Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const LevelGameSetupPage()),
-          );
+          await Navigator.of(context).push(_fadeRoute(const LevelGameSetupPage()));
           _refresh();
         },
       ),
@@ -3600,7 +3662,7 @@ class _HomeHubState extends State<HomeHub>
 
     return Center(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 6, 18, 6),
+        padding: const EdgeInsets.fromLTRB(18, 2, 18, 2),
         child: ConstrainedBox(
           constraints: BoxConstraints(
             maxWidth:
@@ -3610,13 +3672,15 @@ class _HomeHubState extends State<HomeHub>
           ),
           child: LayoutBuilder(
             builder: (context, constraints) {
+              final metrics =
+                  UiMetrics.of(constraints, MediaQuery.orientationOf(context));
               final compact = constraints.maxWidth < 360;
-              final columns = constraints.maxWidth >= 420 ? 2 : 1;
+              // Force 2 columns on all phones 360px+, 1 column only on very small devices
+              final columns = constraints.maxWidth >= 360 ? 2 : 1;
+
               final childAspectRatio = columns == 2
-                  ? (constraints.maxWidth < 520 ? 0.98 : 0.92)
-                  : (constraints.maxWidth > 460
-                      ? 1.65
-                      : (compact ? 1.12 : 1.26));
+                  ? metrics.homeGridAspectRatio
+                  : (compact ? 1.20 : 1.30);
 
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -3624,12 +3688,15 @@ class _HomeHubState extends State<HomeHub>
                   _buildHomeSectionHeader(),
                   Expanded(
                     child: GridView.builder(
-                      padding: EdgeInsets.only(bottom: compact ? 4 : 8),
+                      padding: EdgeInsets.only(
+                        top: compact ? 1 : 3,
+                        bottom: 0,
+                      ),
                       physics: const BouncingScrollPhysics(),
                       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                         crossAxisCount: columns,
-                        mainAxisSpacing: 18,
-                        crossAxisSpacing: 18,
+                        mainAxisSpacing: metrics.cardGap,
+                        crossAxisSpacing: metrics.cardGap,
                         childAspectRatio: childAspectRatio,
                       ),
                       itemCount: modes.length,
@@ -3868,6 +3935,8 @@ class _BigModeCardState extends State<_BigModeCard> {
   @override
   Widget build(BuildContext context) {
     final glowColor = Color.lerp(widget.accent, widget.accentSecondary, 0.5)!;
+    final media = MediaQuery.sizeOf(context);
+    final metrics = UiMetrics.fromSize(media, MediaQuery.orientationOf(context));
 
     return AnimatedScale(
       scale: _pressed ? 0.985 : 1,
@@ -3923,6 +3992,7 @@ class _BigModeCardState extends State<_BigModeCard> {
                 builder: (context, constraints) {
                   final compact =
                       constraints.maxWidth < 220 || constraints.maxHeight < 250;
+                  final imageShare = metrics.homeCardImageShare;
 
                   return Stack(
                     children: [
@@ -3960,10 +4030,10 @@ class _BigModeCardState extends State<_BigModeCard> {
                       ),
                       Padding(
                         padding: EdgeInsets.fromLTRB(
-                          compact ? 14 : 16,
-                          compact ? 14 : 16,
-                          compact ? 14 : 16,
-                          compact ? 16 : 18,
+                          compact ? 12 : 14,
+                          compact ? 12 : 14,
+                          compact ? 12 : 14,
+                          compact ? 12 : 14,
                         ),
                         child: Column(
                           children: [
@@ -4019,11 +4089,13 @@ class _BigModeCardState extends State<_BigModeCard> {
                                 ),
                               ],
                             ),
-                            SizedBox(height: compact ? 10 : 14),
-                            Expanded(
+                            SizedBox(height: compact ? 6 : 8),
+                            SizedBox(
+                              height: constraints.maxHeight * imageShare,
+                              width: double.infinity,
                               child: Container(
                                 width: double.infinity,
-                                padding: EdgeInsets.all(compact ? 10 : 14),
+                                padding: EdgeInsets.all(compact ? 6 : 8),
                                 decoration: BoxDecoration(
                                   borderRadius:
                                       BorderRadius.circular(compact ? 18 : 22),
@@ -4045,36 +4117,47 @@ class _BigModeCardState extends State<_BigModeCard> {
                                 ),
                               ),
                             ),
-                            SizedBox(height: compact ? 10 : 14),
-                            Text(
-                              widget.title,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              textAlign: TextAlign.center,
-                              style: homeOrbitron(
-                                fontSize: compact ? 18 : 20,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 1.0,
-                                color: AppPalette.homeTitle,
-                                height: 1.05,
-                                shadows: [
-                                  Shadow(
-                                    color: widget.accent.withOpacity(0.18),
-                                    blurRadius: 16,
-                                  ),
-                                ],
-                              ),
-                            ),
                             SizedBox(height: compact ? 6 : 8),
-                            Text(
-                              widget.subtitle,
-                              maxLines: compact ? 3 : 2,
-                              overflow: TextOverflow.ellipsis,
-                              textAlign: TextAlign.center,
-                              style: homeBodyFont(
-                                context,
-                                fontSize: compact ? 11 : 12,
-                                color: AppPalette.homeBody,
+                            Expanded(
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.topCenter,
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      widget.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      textAlign: TextAlign.center,
+                                      style: homeOrbitron(
+                                        fontSize: compact ? 17 : 19,
+                                        fontWeight: FontWeight.w900,
+                                        letterSpacing: 1.0,
+                                        color: AppPalette.homeTitle,
+                                        height: 1.05,
+                                        shadows: [
+                                          Shadow(
+                                            color: widget.accent.withOpacity(0.18),
+                                            blurRadius: 16,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    SizedBox(height: compact ? 2 : 4),
+                                    Text(
+                                      widget.subtitle,
+                                      maxLines: compact ? 2 : 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      textAlign: TextAlign.center,
+                                      style: homeBodyFont(
+                                        context,
+                                        fontSize: compact ? 11 : 12,
+                                        color: AppPalette.homeBody,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ],
@@ -4138,8 +4221,6 @@ class _SetupPageState extends State<SetupPage> {
     if (_busy) return;
     setState(() => _busy = true);
 
-    // tiny debounce so repeated taps never double-start
-    await Future.delayed(const Duration(milliseconds: 140));
     if (!mounted) return;
 
     final boardConfig = standardBoardConfig(_boardSize);
@@ -4351,7 +4432,6 @@ class _FriendSetupPageState extends State<FriendSetupPage> {
     if (_busy) return;
     setState(() => _busy = true);
 
-    await Future.delayed(const Duration(milliseconds: 140));
     if (!mounted) return;
 
     final boardConfig = standardBoardConfig(_boardSize);
@@ -4877,7 +4957,6 @@ class _CoinMatchSetupPageState extends State<CoinMatchSetupPage> {
     }
 
     setState(() => _busy = true);
-    await Future.delayed(const Duration(milliseconds: 140));
     if (!mounted) return;
 
     final boardConfig = standardBoardConfig(_boardSize);
@@ -9345,6 +9424,8 @@ class _StoreTabBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final media = MediaQuery.sizeOf(context);
+    final metrics = UiMetrics.fromSize(media, MediaQuery.orientationOf(context));
     Widget tab(int index, String label) {
       final selected = selectedIndex == index;
       return Expanded(
@@ -9379,14 +9460,17 @@ class _StoreTabBar extends StatelessWidget {
                   : null,
             ),
             alignment: Alignment.center,
-            child: Text(
-              label,
-              textAlign: TextAlign.center,
-              style: safeOrbitron(
-                fontSize: 10,
-                fontWeight: FontWeight.w700,
-                color: selected ? Colors.white : AppPalette.textSubtle,
-                letterSpacing: 1.2,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                style: safeOrbitron(
+                  fontSize: metrics.tabLabelSize,
+                  fontWeight: FontWeight.w700,
+                  color: selected ? Colors.white : AppPalette.textSubtle,
+                  letterSpacing: 1.0,
+                ),
               ),
             ),
           ),
@@ -9395,7 +9479,7 @@ class _StoreTabBar extends StatelessWidget {
     }
 
     return Container(
-      height: 54,
+      height: metrics.tabBarHeight,
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -10195,6 +10279,8 @@ class _SettingsPageState extends State<SettingsPage>
       } catch (_) {}
     }
     final p = await SharedPreferences.getInstance();
+    // Guard setState with mounted check to prevent "setState called after dispose" crash
+    if (!mounted) return;
     setState(() {
       _username = (p.getString(Keys.username) ?? "PLAYER").toUpperCase();
       _email = p.getString(Keys.email) ?? "";
@@ -10266,27 +10352,111 @@ class _SettingsPageState extends State<SettingsPage>
     if (picked == null || !mounted) return;
 
     final file = File(picked.path);
+    
+    // Validate file size (max 5MB)
+    final fileSizeInBytes = await file.length();
+    const maxSizeInBytes = 5 * 1024 * 1024; // 5MB
+    if (fileSizeInBytes > maxSizeInBytes) {
+      if (!mounted) return;
+      showTopNotification(context, "Image too large (max 5MB)", 
+        color: AppPalette.danger);
+      return;
+    }
+    
+    // Save locally first
     await LocalStore.setProfilePhotoPath(file.path);
+
+    // Check connectivity before uploading
+    final isOnline = await ConnectivityService().online;
+    if (!isOnline) {
+      if (!mounted) return;
+      showTopNotification(context, "No internet connection. Photo saved locally.",
+        color: AppPalette.warning);
+      if (mounted) setState(() => _equippedAvatar = LocalStore.equippedAvatarNotifier.value);
+      return;
+    }
+
+    // Show loading dialog
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: AppGlassCard(
+          padding: const EdgeInsets.all(24),
+          child: SizedBox(
+            height: 80,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const CircularProgressIndicator(
+                  valueColor: AlwaysStoppedAnimation<Color>(AppPalette.primary),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Uploading photo...',
+                  style: TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 14,
+                    color: Colors.white.withOpacity(0.9),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
 
     // Upload to Firebase Storage if user is signed in
     final user = FirebaseAuth.instance.currentUser;
-    if (user != null) {
-      try {
+    try {
+      if (user != null) {
+        final objectPath =
+            'profile_photos/${user.uid}/avatar_${DateTime.now().millisecondsSinceEpoch}.jpg';
         final ref = FirebaseStorage.instance
             .ref()
-            .child('profile_photos')
-            .child('${user.uid}.jpg');
+            .child(objectPath);
         await ref.putFile(file);
         final url = await ref.getDownloadURL();
         await LocalStore.setProfilePhotoUrl(url);
         await user.updatePhotoURL(url);
-      } catch (e) {
-        if (kDebugMode) debugPrint('[PHOTO] Upload failed: $e');
+        await UserRepo().syncToFirestore(user.uid, {
+          'Profile': {'photoURL': url}
+        });
       }
+      
+      // Close loading dialog
+      if (mounted) Navigator.pop(context);
+      
+      // Show success
+      if (mounted) {
+        showTopNotification(context, "Photo updated!",
+          color: AppPalette.success);
+        setState(() => _equippedAvatar = LocalStore.equippedAvatarNotifier.value);
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('[PHOTO] Upload failed: $e');
+      
+      // Close loading dialog
+      if (mounted) Navigator.pop(context);
+      
+      // Show error with retry option
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Upload failed: ${e.toString().replaceAll('Exception: ', '')}'),
+          backgroundColor: AppPalette.danger,
+          duration: const Duration(seconds: 4),
+          action: SnackBarAction(
+            label: 'Retry',
+            textColor: Colors.white,
+            onPressed: () => _showAvatarOptions(),
+          ),
+        ),
+      );
     }
-
-    if (mounted)
-      setState(() => _equippedAvatar = LocalStore.equippedAvatarNotifier.value);
   }
 
   void _showChangePasswordDialog() {

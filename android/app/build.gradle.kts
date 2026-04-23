@@ -99,6 +99,12 @@ android {
             // keep debug default signing
         }
     }
+
+    packagingOptions {
+        // Fix for cloud_firestore BuildConfig.class duplication
+        // Exclude duplicate BuildConfig class from cloud_firestore module
+        exclude("io/flutter/plugins/firebase/firestore/BuildConfig.class")
+    }
 }
 
 dependencies {

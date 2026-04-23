@@ -319,6 +319,8 @@ class UserRepo {
     await p.remove(Keys.topupHistory);
     await p.remove(Keys.levelGameCurrentLevel);
     await p.remove(Keys.levelGameCompleted);
+    await p.remove(Keys.profilePhotoPath);
+    await p.remove(Keys.profilePhotoUrl);
     
     // Restore flag if it was set (to prevent auto sign-in after account deletion)
     if (justDeleted) {

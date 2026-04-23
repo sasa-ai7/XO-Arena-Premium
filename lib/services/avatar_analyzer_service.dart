@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/game_avatar.dart';
+
 class AvatarDimension {
   final double centerDxRatio;
   final double centerDyRatio;
@@ -35,9 +37,13 @@ class AvatarAnalyzerService {
   static final Map<String, AvatarDimension> _memoryCache = {};
   static const String _cacheKeyPrefix = 'avatar_dim_v2_';
   static SharedPreferences? _prefs;
+  static Future<void>? _initFuture;
 
   static Future<void> init() async {
-    _prefs = await SharedPreferences.getInstance();
+    _initFuture ??= () async {
+      _prefs = await SharedPreferences.getInstance();
+    }();
+    await _initFuture;
   }
 
   static Future<AvatarDimension> analyze(
@@ -75,7 +81,10 @@ class AvatarAnalyzerService {
       final Uint8List bytes = data.buffer.asUint8List();
       
       // Decode image
-      final ui.Codec codec = await ui.instantiateImageCodec(bytes);
+      final ui.Codec codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: 256,
+      );
       final ui.FrameInfo frameInfo = await codec.getNextFrame();
       final ui.Image image = frameInfo.image;
       
@@ -190,6 +199,14 @@ class AvatarAnalyzerService {
     } catch (e) {
       if (kDebugMode) print('Failed to analyze avatar $assetPath: $e');
       return fallback;
+    }
+  }
+
+  static Future<void> preAnalyzeAll() async {
+    await init();
+    for (final avatar in kGameAvatars) {
+      await analyze(avatar.assetPath);
+      await Future<void>.delayed(const Duration(milliseconds: 8));
     }
   }
 }

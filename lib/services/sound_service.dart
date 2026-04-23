@@ -20,6 +20,7 @@ class SoundService with WidgetsBindingObserver {
   int _duckDepth = 0;
   PlayerState _playerState = PlayerState.stopped;
   bool _startInProgress = false;
+  bool _pausedByLifecycle = false;
 
   bool get isMusicEnabled => _isMusicEnabled;
   double get musicVolume => _musicVolume;
@@ -39,6 +40,9 @@ class SoundService with WidgetsBindingObserver {
   }
 
   Future<void> init() {
+    // Skip if already fully initialized
+    if (_isInitialized) return Future.value();
+    // Otherwise use existing dedup or start new init
     return _initFuture ??= _initInternal();
   }
 
@@ -63,7 +67,7 @@ class SoundService with WidgetsBindingObserver {
             audioFocus: AndroidAudioFocus.none,
           ),
           iOS: AudioContextIOS(
-            category: AVAudioSessionCategory.ambient,
+            category: AVAudioSessionCategory.playback,
             options: {
               AVAudioSessionOptions.mixWithOthers,
             },
@@ -158,8 +162,26 @@ class SoundService with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_isInitialized) return;
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      if (_playerState == PlayerState.playing) {
+        _pausedByLifecycle = true;
+        unawaited(_bgmPlayer.pause());
+      }
+      return;
+    }
     if (state == AppLifecycleState.resumed && _isMusicEnabled) {
-      unawaited(ensureMusicPlaying());
+      if (_pausedByLifecycle) {
+        _pausedByLifecycle = false;
+      }
+      unawaited(ensureMusicPlaying(forceRestart: false));
+      return;
+    }
+    if (state == AppLifecycleState.detached) {
+      _pausedByLifecycle = false;
+      unawaited(stopMusic());
     }
   }
 
